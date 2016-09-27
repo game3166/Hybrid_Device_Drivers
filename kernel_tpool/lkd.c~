@@ -1,0 +1,446 @@
+/* Using IOCTL on a char driver to create a new system call getprocinfo
+//References:
+//Char Driver :http://www.freesoftwaremagazine.com/articles/drivers_linux
+//Ioctl: Linux Device Drivers, Edition 3.
+//Ioctl: http://tuxthink.blogspot.com/2011/01/creating-ioctl-command.html
+//Task Struct: http://www.spinics.net/lists/newbies/msg11186.html
+//Start time: https://enc.com.au/2010/07/12/manually-calculating-process-times/
+*/
+
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/kernel.h> 
+#include <linux/slab.h> 
+#include <linux/fs.h> 
+#include <linux/errno.h> 
+#include <linux/types.h> 
+#include <linux/proc_fs.h>
+#include <linux/fcntl.h> 
+#include <asm-generic/uaccess.h>
+#include <linux/sched.h>
+#include <asm/current.h> 
+#include <linux/list.h>
+#include<linux/wait.h>//wait queue
+
+
+//kthread functions
+//#include <linux/delay.h>
+#include <linux/kthread.h>
+
+#include "fifo.h"
+#include "lpc_ioctl.h"
+#define NUM_THREADS 1
+
+struct task_struct* current_task_struct; //task struct from sched.h
+static int major=60; //major number
+static char* buffer; //buffer to store a char for read and write
+
+
+MODULE_AUTHOR("Chaitanya Soma"); 
+MODULE_LICENSE("Dual BSD/GPL"); 
+MODULE_DESCRIPTION("Local procedure calls between user and kernel");
+
+//driver init functions
+int driver_init(void);
+void driver_exit(void);
+
+//driver simulated functions - replace with actual device calls later
+int char_open(struct inode *inode, struct file* file);
+ssize_t my_read(struct file *file, char *buf, size_t count, loff_t *f_pos);
+ssize_t my_write(struct file *file, const char *buf, size_t count, loff_t *f_pos);
+int char_release(struct inode *inode, struct file* file);
+
+
+//ioctl functions for upcalls and downcalls
+static long my_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
+
+//Module init and exit functions
+module_init(driver_init);
+module_exit(driver_exit);
+
+//LPC Structures
+
+//request queue
+static struct node* req_head=NULL; //head of  response queue
+static struct node* req_tail=NULL; //tail of response queue
+//sync
+static struct semaphore sem_req;
+static struct mutex dequeue_req;
+static struct mutex enqueue_req;
+//wake up semaphore
+//struct semaphore wake[NUM_THREADS];
+struct semaphore wake;
+
+//consumer thread arguments
+struct con_arg
+{
+	int tid;
+	double stuff;
+	struct node** head;
+	struct node** tail;	
+	
+};
+
+//producer thread arguments
+struct prod_arg
+{
+	int tid;
+	double stuff;
+	struct node** head;
+	struct node** tail;	
+	
+};
+
+
+/*------------------------------------------------------------------------
+ * Fops structure
+ *------------------------------------------------------------------------
+ */
+struct file_operations fops = {
+	open: char_open,
+	read: my_read,
+	write: my_write,  
+	release: char_release,
+	unlocked_ioctl: my_ioctl
+};
+
+//request queue
+
+//Struct to store all function pointers
+
+struct job procedures[10]; //array of job pointers to store all jobs
+
+//function prototypes
+void* uexec_lpc(void* arg);
+
+//void* consumer_thread(void* arg);
+void task1(void* arg);
+void task2(void* arg);
+void task3(void);
+
+//Wait Queue
+wait_queue_head_t wqueue;
+int flag=0;
+
+
+/*------------------------------------------------------------------------
+ * Function: driver_init()
+ * Descrip : Module Init function, Registers the driver
+ *------------------------------------------------------------------------
+ */
+int driver_init(void) 
+{
+	int result;
+	//lpc vairable
+	/*struct node* req_head;
+	struct node* req_tail;*/
+	
+	//consumer threads
+	//static struct task_struct *con_threads[NUM_THREADS];//[NUM_THREADS];
+	//struct con_arg con_arg_list[NUM_THREADS];
+	//int done[NUM_THREADS];
+
+	//int i;//iterator
+	
+
+	req_head=NULL;
+	req_tail=NULL;
+	//intialize semaphore
+	sema_init(&sem_req,0);
+	mutex_init(&dequeue_req);
+	mutex_init(&enqueue_req);
+	//wake up semaphore lot
+	sema_init(&wake,0);
+
+	//general variables
+	
+	//int rvalue;//return value
+
+	//LPC END
+	
+	//Char Driver Registartaion
+	//Major Number = 60
+	//Driver Name = procinfo
+	//enqueue(&req_head,&req_tail,0,(void*)task1,NULL, &sem_req, &enqueue_req);
+	result = register_chrdev(major, "procinfo", &fops);
+	if (result < 0) 
+	{
+		printk(KERN_INFO "Invalid major number %d\n", major);
+		return result; //exit function
+	}
+	
+	//to simulate a physical device we allocate one byte memory and read and write to that byte
+	buffer=kmalloc(1,GFP_KERNEL);
+	if(!buffer)
+	{
+		result=-ENOMEM; //out of memory error
+		printk(KERN_INFO "Memory allocation failed, Unregistering Device procinfo\n");
+		unregister_chrdev(major, "procinfo"); //unregister device
+		return result;
+	}
+	//memory successfully allocated
+	memset(buffer,0,1); //null memory
+	printk(KERN_INFO "Module procinfo Inserted now and Driver Registered\n");
+
+	//Populate function pointers
+	procedures[0].procedure=(void*)task1;
+	procedures[1].procedure=(void*)task2;
+	procedures[2].procedure=(void*)task3;
+	
+	mdelay(1000);	
+	printk(KERN_INFO "The END \n");
+	return 0; //success
+}
+
+/*------------------------------------------------------------------------
+ * Function: driver_exit()
+ * Descrip : Module exit function, unregisters the driver and frees memory
+ *------------------------------------------------------------------------
+ */
+
+void driver_exit(void) 
+{
+	unregister_chrdev(major, "procinfo"); //unregister device
+	if(buffer!=NULL) //check if memory allocated
+	{
+		kfree(buffer);//free memory
+	}
+	printk(KERN_INFO "Removing Module and Unregistering procinfo\n");
+}
+
+/*------------------------------------------------------------------------
+ * Function: char_open()
+ * Descrip : Handles the open function for the driver
+ *------------------------------------------------------------------------
+ */
+int char_open(struct inode *inode, struct file* file)
+{
+	printk(KERN_INFO"In open\r\n");	
+	return 0; //nothing to do, return success
+}
+
+/*------------------------------------------------------------------------
+ * Function: my_read()
+ * Descrip : Handles the open function, Read one byte from the buffer
+ *------------------------------------------------------------------------
+ */
+ssize_t my_read(struct file *file, char *buf, size_t count, loff_t *f_pos)
+{
+	copy_to_user(buf,buffer,1); //copy one byte from user space into buffer
+	if (*f_pos == 0) 
+	{ 
+		*f_pos+=1; 
+		return 1; 
+	} 
+	else 
+	{ 
+		return 0; 
+	}
+}
+
+/*------------------------------------------------------------------------
+ * Function: my_write()
+ * Descrip : Handles the write function, writes one byte to user buffer
+ *------------------------------------------------------------------------
+ */
+ssize_t my_write(struct file *file, const char *buf, size_t count, loff_t *f_pos)
+{
+	char *temp;
+	temp=(char*)buf+count-1;
+	copy_from_user(buffer,temp,1);//write to user buffer
+	return 1;
+}
+
+/*------------------------------------------------------------------------
+ * Function: char_release()
+ * Descrip : Handles the release funciton
+ *------------------------------------------------------------------------
+ */
+int char_release(struct inode *inode, struct file* file)
+{
+	return 0; //do nothing
+}
+
+/*------------------------------------------------------------------------
+ * Function: my_ioctl()
+ * Descrip : ioctl function provides syscall functionality
+ *------------------------------------------------------------------------
+ */
+
+static long my_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+
+	
+	procinfo pinfo;		
+	struct list_head * position;
+
+	//EXEC_LPC variables
+	char* func_name;
+	int index=0; // index to traverse the right frunction pointer	
+	void* (*func_buff)(void* arg);//function pointer to execute
+	//void*  arg_buff; //buffer for funtion 
+
+	//POLL
+	lpcreq lpc_req;
+	int temp;
+
+	
+
+	
+	switch(cmd)
+	{	
+		//Get proc Info Function
+		case PROC_INFO:
+			
+			if( copy_from_user( &pinfo, (procinfo*)arg, sizeof(procinfo)))
+			{
+				return -EACCES;
+			}
+			if(pinfo.pid == 0)
+			{
+				current_task_struct=get_current();
+			}
+			else
+			{
+				//current_task_struct=find_task_by_vpid(pinfo.pid);
+				current_task_struct=pid_task (find_vpid(pinfo.pid),PIDTYPE_PID);
+			}
+
+
+			pinfo.pid=task_pid_nr(current_task_struct);
+			pinfo.ppid=task_ppid_nr(current_task_struct);
+			pinfo.start_time=current_task_struct->start_time;
+			//pinfo.number= 55;
+			pinfo.number=0;
+			list_for_each(position, &current_task_struct->sibling)
+			{
+				pinfo.number++;
+			}
+			if( copy_to_user( (procinfo*)arg, &pinfo, sizeof(procinfo)))
+			{
+				return -EACCES;
+			}
+			break;
+
+		//Execute LPC request from user thread		
+		case EXEC_LPC:
+			
+			printk(KERN_INFO "In LPC");			
+			func_name=kmalloc(sizeof(char)*1000,GFP_KERNEL);
+			
+			//Get arguments from user function
+			if( copy_from_user ( &index, (int*)arg, sizeof(int) ) )
+			{
+				printk(KERN_INFO "copy form user failed\n");
+				return -EACCES;
+			}
+			
+			printk(KERN_INFO "Arg is %d\n",index);//index recived
+
+			func_buff=(void*)procedures[index].procedure;	
+			//arg_buff=(void*) "abc";	
+			func_buff(NULL);//execute function request by user
+
+			index=index+2;
+			
+			//send return value back to the user
+			if( copy_to_user( (int*)arg, &index, sizeof(int) ) )
+			{
+				return -EACCES;
+			}		
+					
+			kfree(func_name); //free memory
+			
+			break;
+
+		//User thread blocks here waiting for an upcall
+		case POLL_LPC:
+			
+			//Block The user thread				
+			printk(KERN_INFO"Waiting... to Dequeue done\n");		
+			down_interruptible(&sem_req);
+			dequeue(&req_head,&req_tail, 0, &enqueue_req);
+			printk(KERN_INFO"Dequeue done\n");
+			//Send LPC reqeust to user
+			lpc_req.func_index=1;
+			strcpy(lpc_req.str,"Hey from kernel");
+			temp=55;			
+			
+			if( copy_to_user( (void*)arg, (void*)&lpc_req, sizeof(lpc_req) ) )
+			{
+				return -EACCES;
+			}			
+
+			break; //return 
+
+		case RESPONSE_LPC:
+			flag=1;
+			wake_up_interruptible(&wqueue);		
+			//up(&wake);
+			break;
+
+		case REQUEST_LPC:
+			flag=0;
+			enqueue(&req_head,&req_tail,0,(void*)task1,NULL, &sem_req, &enqueue_req);
+			printk(KERN_INFO "Thread Sleeping on user\n");
+			init_waitqueue_head(&wqueue);
+			wait_event_interruptible(wqueue,flag==1);
+			printk(KERN_INFO "Thread woke up by user\n");
+			break;
+			
+		default:
+			return -EINVAL;
+	}
+	return 0;
+}
+
+/*------------------------------------------------------------------------
+ * Function: task1()
+ * Descrip : Dummy task simulating exported functions
+ *------------------------------------------------------------------------
+ */
+void task1(void* arg)
+{	
+	//char* message;	
+	//tid=*((int*)(arg));
+	//message=( (char*) (arg) );
+	printk(KERN_INFO"Task 1:\n");// %s\n",message);	
+}
+
+/*------------------------------------------------------------------------
+ * Function: task2()
+ * Descrip : Dummy task simulating exported functions
+ *------------------------------------------------------------------------
+ */
+void task2(void* arg)
+{	
+	//int tid;
+	//tid=*((int*)(arg));
+	printk(KERN_INFO"Task 2:\n");// %d\n",tid);
+}
+/*------------------------------------------------------------------------
+ * Function: task2()
+ * Descrip : Dummy task simulating exported functions
+ *------------------------------------------------------------------------
+ */
+void task3(void)
+{		
+	printk(KERN_INFO"In Task 3\n");	
+}
+/*------------------------------------------------------------------------
+ * Function: uexec_lpc()
+ * Descrip : LPC call to user driver
+ *------------------------------------------------------------------------
+ */
+void* uexec_lpc(void* arg)
+{
+
+	flag=0;
+	enqueue(&req_head,&req_tail,0,(void*)task1,NULL, &sem_req, &enqueue_req);
+	printk(KERN_INFO "Thread Sleeping on user\n");
+	init_waitqueue_head(&wqueue);
+	wait_event_interruptible(wqueue,flag==1);
+	printk(KERN_INFO "Thread woke up by user\n");
+	return arg;
+}
+
