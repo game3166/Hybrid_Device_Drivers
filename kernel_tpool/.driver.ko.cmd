@@ -1,0 +1,1 @@
+cmd_/home/csoma/Desktop/project/kernel_tpool/driver.ko := ld -r -m elf_x86_64 -T ./scripts/module-common.lds --build-id  -o /home/csoma/Desktop/project/kernel_tpool/driver.ko /home/csoma/Desktop/project/kernel_tpool/driver.o /home/csoma/Desktop/project/kernel_tpool/driver.mod.o

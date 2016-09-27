@@ -1,0 +1,1 @@
+cmd_/home/csoma/Desktop/project/kernel_tpool/driver.o := ld -m elf_x86_64   -r -o /home/csoma/Desktop/project/kernel_tpool/driver.o /home/csoma/Desktop/project/kernel_tpool/lkd.o /home/csoma/Desktop/project/kernel_tpool/fifo.o 

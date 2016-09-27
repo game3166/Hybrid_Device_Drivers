@@ -1,0 +1,21 @@
+ifeq ($(KERNELRELEASE),)  
+
+KERNELDIR ?= /lib/modules/$(shell uname -r)/build 
+PWD := $(shell pwd)  
+
+.PHONY: build clean  
+
+build:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules  
+
+clean:
+	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c 
+else  
+
+$(info Building with KERNELRELEASE = ${KERNELRELEASE}) 
+obj-m :=   lkd.o
+obj-m :=   fifo.o
+obj-m :=   driver.o
+driver-objs := lkd.o fifo.o  
+
+endif

@@ -1,0 +1,29 @@
+#ifndef PROC_IOCTL_H
+#define PROC_IOCTL_H
+#include <linux/ioctl.h>
+
+
+typedef struct 
+{
+	pid_t pid;
+	pid_t ppid;
+	unsigned long start_time;
+	int number;
+} procinfo;
+
+//every function will have its own custom struct with first element as func_index
+typedef struct
+{
+	int func_index;
+	char str[1024];
+	
+}lpcreq;
+
+#define PROC_INFO _IOWR('k', 1, procinfo*)
+#define EXEC_LPC _IOWR('k', 2, int*)
+#define POLL_LPC _IOWR('k', 3, void*)
+#define RESPONSE_LPC _IOWR('k', 4, void*)
+#define REQUEST_LPC  _IOWR('k', 5, void*)
+
+
+#endif
